@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promptc"
+version = "0.1.0"
+description = "A compiler for prompts: assemble fragments, validate against decidable rules, measure with external verifiers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+# Everything optional degrades loudly rather than silently:
+#   tokenizers/tiktoken  exact token budgets (PC004)
+#   textstat             sentence complexity (PC103)
+#   jsonschema           JSON Schema output contracts
+[project.optional-dependencies]
+tokenizers = ["tiktoken>=0.5", "tokenizers>=0.15"]
+prose = ["textstat>=0.7"]
+schema = ["jsonschema>=4.0"]
+dev = ["pytest>=7.0"]
+all = ["tiktoken>=0.5", "tokenizers>=0.15", "textstat>=0.7", "jsonschema>=4.0", "pytest>=7.0"]
+
+[project.scripts]
+promptc = "promptc.cli:main"
+
+[tool.setuptools]
+packages = ["promptc", "promptc.rules", "promptc.evalharness"]
+
+[tool.setuptools.package-data]
+promptc = ["../templates/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
