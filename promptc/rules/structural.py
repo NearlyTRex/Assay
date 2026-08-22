@@ -1,8 +1,13 @@
-# Structural rules: PC001-PC013.
-#
-# Everything in this module is decidable from the source tree plus, for
-# PC006, the exit code of a program you configured. No model is consulted
-# and no threshold is guessed.
+"""Structural rules: PC001-PC013.
+
+Everything in this module is decidable from the source tree plus, for
+PC006, the exit code of a program you configured. No model is consulted and
+no threshold is guessed.
+
+Each check takes what it needs and returns a list of Diagnostic. None of
+them raises, prints, or short-circuits on the first fault -- a check run
+must be able to report everything wrong at once.
+"""
 
 # Imports
 import os
@@ -15,6 +20,22 @@ from ..diagnostics import Diagnostic, Severity
 # PC001 -- dangling references
 ###########################################################
 def check_references(index, fragments):
+    """Report references that cannot resolve (PC001).
+
+    Two distinct faults share this id. An explicit `{{ref:id}}` naming a
+    fragment not in `requires` is absent from any assembly that does not
+    happen to route it. A prose reference -- "see above", a section number
+    -- can never resolve, because fragments assemble in different
+    combinations per task.
+
+    Args:
+        index: Built Index, used to tell an unknown id from an undeclared
+            one so the message can say which.
+        fragments: Fragments to check.
+
+    Returns:
+        list: PC001 diagnostics, ERROR severity.
+    """
     found = []
     for item in fragments:
         available = set(item.requires)
@@ -50,6 +71,15 @@ def check_references(index, fragments):
 # PC002 -- unresolved requires
 ###########################################################
 def check_requires(index, fragments):
+    """Report `requires` entries naming no known fragment (PC002).
+
+    Args:
+        index: Built Index.
+        fragments: Fragments to check.
+
+    Returns:
+        list: PC002 diagnostics, ERROR severity.
+    """
     found = []
     for item in fragments:
         for required in item.requires:
@@ -70,6 +100,21 @@ from .base import CATALOGUE  # noqa: E402  (kept local to avoid a cycle at impor
 from ..fragment import CONTRACT_REQUIRED_KINDS  # noqa: E402
 
 def check_contracts(config, fragments):
+    """Report missing or unresolvable output contracts (PC005, PC013).
+
+    A task without a contract cannot fail closed, so malformed output
+    reaches the pipeline and has to be caught later by something else. A
+    contract path that does not exist is worse: the prompt only appears to
+    fail closed.
+
+    Args:
+        config: Loaded Config, for resolving contract paths against root.
+        fragments: Fragments to check.
+
+    Returns:
+        list: PC005 for a task with no contract, PC013 for a declared
+        contract whose file is absent. Both ERROR severity.
+    """
     found = []
     for item in fragments:
         if not item.contract:
@@ -105,6 +150,20 @@ def check_contracts(config, fragments):
 # checked. A term used by a fragment that cannot see its provider is an
 # error; a word nobody declared is simply not a term of art.
 def check_glossary(index, fragments):
+    """Report terms of art used without their definition in scope (PC007).
+
+    Only terms some fragment actually declares via `provides` are checked.
+    A word nobody declared is not a term of art and is left alone -- which
+    is what keeps this rule from firing on ordinary prose.
+
+    Args:
+        index: Built Index, supplying the term-to-provider map.
+        fragments: Fragments to check.
+
+    Returns:
+        list: PC007 diagnostics, ERROR severity. Empty when the library
+        declares no terms at all.
+    """
     found = []
     if not index.providers:
         return found
@@ -139,6 +198,18 @@ def check_glossary(index, fragments):
 # PC010 -- orphans
 ###########################################################
 def check_orphans(index):
+    """Report fragments no task or trigger can reach (PC010).
+
+    A warning rather than an error: an orphan is usually dead weight, but
+    it is sometimes a routing rule someone forgot to add, and failing the
+    build on that would be wrong.
+
+    Args:
+        index: Built Index.
+
+    Returns:
+        list: PC010 diagnostics, WARN severity.
+    """
     found = []
     for item in index.orphans():
         found.append(Diagnostic(
@@ -154,6 +225,19 @@ def check_orphans(index):
 # PC011 / PC012 -- suppressions
 ###########################################################
 def check_suppression_justifications(suppressions):
+    """Report suppressions with no usable reason (PC011).
+
+    A gate an agent loops against is a gate an agent learns to satisfy
+    cheaply, and a bare `promptc-disable` is the cheapest possible way.
+    Requiring a written reason keeps every silenced rule reviewable.
+
+    Args:
+        suppressions: Suppression objects gathered from every fragment.
+
+    Returns:
+        list: PC011 diagnostics, ERROR severity, for justifications under
+        twelve characters.
+    """
     found = []
     for suppression in suppressions:
         if len(suppression.justification) < 12:
@@ -168,6 +252,16 @@ def check_suppression_justifications(suppressions):
     return found
 
 def check_unused_suppressions(suppressions):
+    """Report suppressions that matched nothing (PC012).
+
+    Call after Report.apply_suppressions, which sets `used`.
+
+    Args:
+        suppressions: Suppression objects, already applied to a report.
+
+    Returns:
+        list: PC012 diagnostics, WARN severity.
+    """
     found = []
     for suppression in suppressions:
         if suppression.used:
@@ -185,6 +279,22 @@ def check_unused_suppressions(suppressions):
 # PC004 -- token budget
 ###########################################################
 def check_budget(assembly, profile, counter):
+    """Report assemblies and fragments over their token budget (PC004).
+
+    The per-fragment breakdown matters more than the total: knowing you are
+    4,000 tokens over is useless without knowing which three fragments to
+    cut, so the message names the three largest.
+
+    Args:
+        assembly: Assembly to measure.
+        profile: Target Profile, supplying context size and reserves.
+        counter: Counter for the profile's tokenizer. May be an estimate,
+            in which case PC014 will already have been raised.
+
+    Returns:
+        list: One ERROR when the whole assembly exceeds the profile budget,
+        plus one WARN per fragment over its own declared `budget`.
+    """
     found = []
     total = counter.count(assembly.text)
     budget = profile.budget()

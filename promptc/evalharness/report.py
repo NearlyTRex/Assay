@@ -1,8 +1,13 @@
-# Aggregation and reporting.
-#
-# Three outputs matter: the headline pass rate, the per-trigger scorecard
-# that says which recipe to rewrite next, and the failure taxonomy that
-# says what kind of fix each failure needs.
+"""Aggregation and reporting.
+
+Three outputs matter: the headline pass rate, the per-trigger scorecard
+that says which recipe to rewrite next, and the failure taxonomy that says
+what kind of fix each failure needs.
+
+The scorecard is the actionable one. A pass rate alone tells you the prompt
+is imperfect; a per-recipe breakdown tells you which of fifty recipes to
+open first.
+"""
 
 # Imports
 import dataclasses
@@ -16,6 +21,18 @@ from . import score
 ###########################################################
 @dataclasses.dataclass
 class RunResult:
+    """Everything one profile's run over one split produced.
+
+    Attributes:
+        profile: Profile name this run used.
+        task: Task fragment assembled as the prompt.
+        split: `dev`, `test` or `all`.
+        items: ItemResult per work item.
+        attempts: Attempts allowed per item, i.e. the k in pass@k.
+        prompt_tokens: Mean prompt size across items.
+        tokenizer: Label from the counter, marked when it estimates.
+    """
+
     profile: str
     task: str
     split: str
@@ -25,12 +42,21 @@ class RunResult:
     tokenizer: str = ""
 
     def pass_rate(self):
+        """Return pass@k -- the share of items that passed within k tries.
+
+        Returns:
+            float: In [0, 1]. Zero for an empty run rather than raising.
+        """
         if not self.items:
             return 0.0
         return sum(1 for item in self.items if item.passed()) / len(self.items)
 
-    # pass@1 uses only the first attempt of each item
     def pass_at_1(self):
+        """Return the share that passed on their first attempt.
+
+        Compared against pass_rate, the gap is what retries are buying --
+        which is nearly free locally and is not free through an API.
+        """
         if not self.items:
             return 0.0
         first = sum(1 for item in self.items
@@ -38,15 +64,30 @@ class RunResult:
         return first / len(self.items)
 
     def mean_attempts_to_green(self):
+        """Return the mean attempts needed by the items that passed.
+
+        Failures are excluded: they consumed every attempt by definition,
+        and averaging them in would say more about `attempts` than about
+        the prompt.
+        """
         greens = [item.attempts_to_green() for item in self.items if item.passed()]
         return sum(greens) / len(greens) if greens else 0.0
 
     ###########################################################
     # Per-trigger scorecard
     ###########################################################
-    # An item counts towards every trigger that fired for it, so a recipe's
-    # score reflects every case it was asked to handle.
     def scorecard(self):
+        """Return the pass rate per routed recipe, worst first.
+
+        An item counts towards every trigger that fired for it, so a
+        recipe's score reflects every case it was asked to handle rather
+        than only the ones where it was the primary match.
+
+        Returns:
+            list: Dicts with trigger, total, passed and pass_rate. Sorted
+            by ascending pass rate, then descending volume, so the recipe
+            most worth rewriting is first.
+        """
         buckets = {}
         for item in self.items:
             keys = item.triggers or ["<none>"]
@@ -72,6 +113,15 @@ class RunResult:
     # Failure taxonomy
     ###########################################################
     def taxonomy(self):
+        """Return a count per outcome bucket, most common first.
+
+        Verifier failures are keyed as `verifier_failed:<id>`, so the
+        report names which check rejected the output rather than only that
+        something did.
+
+        Returns:
+            dict: Outcome to count.
+        """
         buckets = {}
         for item in self.items:
             outcome = item.outcome()
@@ -81,6 +131,16 @@ class RunResult:
         return dict(sorted(buckets.items(), key = lambda pair: -pair[1]))
 
     def to_dict(self, include_items = False):
+        """Return the run as a JSON-ready mapping.
+
+        Args:
+            include_items: Include a row per work item. Off by default,
+                since a large corpus makes the summary unreadable.
+
+        Returns:
+            dict: Headline figures, taxonomy and scorecard, plus `results`
+            when per-item rows are requested.
+        """
         payload = {
             "profile": self.profile,
             "task": self.task,
@@ -114,9 +174,22 @@ class RunResult:
 ###########################################################
 # Portability
 ###########################################################
-# The number that answers "is this prompt optimised for open weights?".
-# Scored entirely by external verifiers -- no model judges anything.
 def portability(runs, baseline_profile):
+    """Compare each run's pass rate against a baseline profile.
+
+    This is the number that answers "is this prompt optimised for
+    open-weight models?" -- and it is scored entirely by external
+    verifiers, with no model judging anything.
+
+    Args:
+        runs: RunResult objects from the same corpus and split.
+        baseline_profile: Profile name forming the denominator.
+
+    Returns:
+        list: One row per non-baseline run. Empty when the baseline is
+        absent or scored zero, since dividing by a baseline that failed
+        everything says nothing.
+    """
     baseline = next((run for run in runs if run.profile == baseline_profile), None)
     if baseline is None or baseline.pass_rate() == 0:
         return []
@@ -138,6 +211,16 @@ def portability(runs, baseline_profile):
 # Rendering
 ###########################################################
 def render_json(runs, baseline_profile = "", include_items = False):
+    """Render runs as JSON.
+
+    Args:
+        runs: RunResult objects.
+        baseline_profile: When given, adds a `portability` block.
+        include_items: Include per-item rows.
+
+    Returns:
+        str: Indented JSON.
+    """
     payload = {
         "runs": [run.to_dict(include_items) for run in runs],
     }
@@ -146,10 +229,21 @@ def render_json(runs, baseline_profile = "", include_items = False):
     return json.dumps(payload, indent = 2)
 
 def _bar(rate, width = 18):
+    """Render a pass rate as an ASCII bar."""
     filled = int(round(rate * width))
     return "#" * filled + "." * (width - filled)
 
 def render_text(runs, baseline_profile = ""):
+    """Render runs for a terminal.
+
+    Args:
+        runs: RunResult objects.
+        baseline_profile: When given, appends the portability index.
+
+    Returns:
+        str: Headline figures, taxonomy, scorecard with bars, and
+        portability. Trailing whitespace is stripped.
+    """
     lines = []
     for run in runs:
         lines.append(f"profile {run.profile}   task {run.task}   split {run.split}")

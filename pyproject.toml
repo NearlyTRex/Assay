@@ -35,3 +35,10 @@ promptc = ["../templates/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Unmarked tests are unit tests: in-process, no subprocess, no network, no
+# filesystem outside tmp_path. Anything else must carry a marker.
+markers = [
+    "integration: crosses a real process boundary (CLI, external verifier, model backend)",
+    "slow: takes more than a second",
+]
+addopts = "--strict-markers"

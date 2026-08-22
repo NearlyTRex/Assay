@@ -1,8 +1,15 @@
-# Eval orchestration.
-#
-# The one part of the toolset that runs a model -- and even here the model
-# is the subject, never the judge. Pass and fail come from the verifier
-# commands in promptc.yaml.
+"""Eval orchestration.
+
+The one part of the toolset that runs a model -- and even here the model is
+the subject, never the judge. Pass and fail come from the verifier commands
+in promptc.yaml.
+
+Two properties are load-bearing. Each item's prompt is assembled from *its
+own* triggers, so a recipe is measured only on the cases it was routed for.
+And the golden answer is read but never rendered into a prompt: if it
+leaked, every pass rate the tool has ever reported would be meaningless,
+which is why a test asserts on the captured prompt directly.
+"""
 
 # Imports
 import os
@@ -21,9 +28,20 @@ from . import score as score_module
 ###########################################################
 # Prompt construction
 ###########################################################
-# Render one work item's input files into the payload appended to the
-# assembled instructions.
 def render_payload(config, item, root):
+    """Render one work item's input files into the prompt payload.
+
+    Each input becomes a headed, fenced block so the model can tell the
+    files apart. The golden answer is deliberately not among them.
+
+    Args:
+        config: Loaded Config, supplying `eval.payload_header`.
+        item: The work Item.
+        root: Absolute corpus root.
+
+    Returns:
+        str: The header followed by one block per existing input file.
+    """
     parts = []
     for relative, text in item.read_inputs(root):
         language = os.path.splitext(relative)[1].lstrip(".")
@@ -34,10 +52,41 @@ def render_payload(config, item, root):
 # Run
 ###########################################################
 class EvalError(Exception):
-    pass
+    """The evaluation cannot start.
+
+    Raised only for faults that make the whole run meaningless -- no task,
+    no verifier, an empty corpus. Anything that goes wrong for a single
+    item becomes a taxonomy bucket instead.
+    """
 
 def run_eval(config, profile_name, limit = 0, per_group = 0, split = "dev",
              attempts = 0, progress = None):
+    """Run a model over the corpus and score it with external verifiers.
+
+    Each item is assembled with its own triggers, generated up to `attempts`
+    times with a fixed seed per attempt, and stopped at the first success.
+
+    Args:
+        config: Loaded Config.
+        profile_name: Profile naming the model and backend.
+        limit: Cap the item count after sampling. Zero means no cap.
+        per_group: Sample at most this many items per stratum. Zero takes
+            everything.
+        split: `dev` to tune on, `test` to report from, `all` for one-off
+            inspection.
+        attempts: Override `eval.attempts`. Zero uses the configured value.
+        progress: Optional callable(position, total, item_result), invoked
+            after each item.
+
+    Returns:
+        RunResult: Carrying per-item outcomes, the scorecard and the
+        taxonomy.
+
+    Raises:
+        EvalError: Unknown profile or split, `eval.task` unset or missing
+            from the library, `eval.verifiers` empty, the library failing
+            to parse, or the corpus glob matching nothing.
+    """
     profile = config.profile(profile_name)
     if profile is None:
         known = ", ".join(sorted(config.profiles)) or "none defined"
@@ -133,9 +182,21 @@ def run_eval(config, profile_name, limit = 0, per_group = 0, split = "dev",
 ###########################################################
 # Grammar
 ###########################################################
-# Only GBNF is passed to the backend; a JSON Schema contract is validated
-# by a verifier instead, since not every backend can enforce one.
 def _load_grammar(config, task):
+    """Load a task's GBNF grammar, if it has one.
+
+    Only GBNF is passed to the backend. A JSON Schema contract is validated
+    by a verifier instead, since not every backend can enforce one.
+
+    Args:
+        config: Loaded Config, for resolving the contract path.
+        task: The task Fragment.
+
+    Returns:
+        str: The grammar text, or empty when the task has no contract, the
+        contract is not GBNF, or the file is absent. A missing file is
+        PC013's problem, so this stays quiet.
+    """
     if not task or not task.contract:
         return ""
     if not task.contract.endswith(".gbnf"):

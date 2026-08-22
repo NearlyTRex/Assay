@@ -74,12 +74,12 @@ the checks decidable.
 
 ```markdown
 ---
-id:        depun-named-fields
+id:        unchecked-return
 kind:      recipe            # task | rule | recipe | workflow | example | glossary
-title:     De-pun raw offsets to named fields
-triggers:  [partial_struct_copy, stale_struct_offset_64bit]
+title:     Guard a return value before using it
+triggers:  [unchecked_return, null_deref]
 requires:  [core-fidelity, type-system]
-provides:  ["keep file", "de-pun"]
+provides:  ["work item", "guard clause"]
 contract:  contracts/patched-source.gbnf
 budget:    600
 ---
@@ -157,7 +157,7 @@ verifiers:
     command: ["scripts/test_compilation.sh", "{file}"]
 
 profiles:
-  qwen-7b:
+  local-7b:
     context: 32768
     tokenizer: hf:Qwen/Qwen2.5-Coder-7B
     reserve: 9000              # held back for the runtime work item
@@ -165,18 +165,18 @@ profiles:
     backend: llamacpp
 
 eval:
-  task: fix-compilation
-  verifiers: [cpp-compiles, suspects-clean]
+  task: fix-source
+  verifiers: [compiles, lint-clean]
   extract: fence
-  suffix: .cpp
+  suffix: .c
   attempts: 5
-  baseline_profile: claude
+  baseline_profile: reference
 
 corpus:
-  root: annotations/nocedit.exe/pseudocode/src
-  discover: "**/*.keep.cpp"
-  golden_suffix: ".keep.cpp"     # never shown to the model
-  inputs: ["{stem}.cpp", "{stem}.asm", "{stem}.json"]
+  root: corpus
+  discover: "**/*.expected.c"
+  golden_suffix: ".expected.c"   # never shown to the model
+  inputs: ["{stem}.c", "{stem}.meta.json"]
   triggers_command: ["scripts/detect.sh", "{stem}"]
   stratify_by: triggers
   holdout: 0.2
@@ -205,7 +205,7 @@ Run several profiles to get the **portability index**
 entirely by external verifiers.
 
 ```bash
-promptc eval --profile qwen-7b --profile claude --split test --out results.json
+promptc eval --profile local-7b --profile reference --split test --out results.json
 promptc calibrate results.json
 ```
 
@@ -234,10 +234,33 @@ Python 3.10+ and PyYAML. Everything else is optional and degrades loudly:
 - `textstat` — PC103
 - `jsonschema` — JSON Schema output contracts
 
-Install via the JoyBox bootstrap, or `pip install -e ".[all]"`.
+```bash
+pip install -e ".[all]"
+```
 
 ## Tests
 
 ```bash
-python3 -m pytest tests/ -q
+python3 -m pytest tests/ -q                        # 344 tests
+python3 -m pytest tests/ -q -m "not integration"   # fast loop, no subprocesses
 ```
+
+`tests/` mirrors `promptc/` one file per module. Integration tests are
+marked; everything unmarked is in-process and finishes in under a second.
+No test contacts a real model. See [docs/testing/](docs/testing/).
+
+## Documentation
+
+Full index at [docs/](docs/).
+
+| | |
+|---|---|
+| [docs/usage/](docs/usage/) | Installing, quick start, commands, `promptc.yaml`, fragments, eval, the agent loop |
+| [docs/coding-standard/](docs/coding-standard/) | Invariants, layout, naming, formatting, docstrings, error handling, diagnostics, adding a rule |
+| [docs/testing/](docs/testing/) | Layout, unit, integration, models, fixtures, testing rules, assertions |
+
+Three starting points:
+
+- [coding-standard/invariants.md](docs/coding-standard/invariants.md) — the five architectural rules
+- [coding-standard/docstrings.md](docs/coding-standard/docstrings.md) — the docstring convention, part by part
+- [testing/models.md](docs/testing/models.md) — why no test may contact a real model

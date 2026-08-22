@@ -1,8 +1,13 @@
-# External verification of example blocks (PC006).
-#
-# This is the module that keeps the toolset domain-agnostic. It knows how to
-# extract a fenced block, write it to a file, run a command you configured,
-# and read an exit code. It knows nothing about what the command does.
+"""External verification of example blocks (PC006).
+
+This is the module that keeps the toolset domain-agnostic. It knows how to
+extract a fenced block, write it to a file, run a command you configured,
+and read an exit code. It knows nothing about what the command does.
+
+Verifying examples matters more than it first appears: a worked example
+that no longer compiles is worse than no example, because small models copy
+examples far more literally than they follow prose.
+"""
 
 # Imports
 import dataclasses
@@ -28,6 +33,17 @@ NOVERIFY_TOKEN = "promptc:noverify"
 
 @dataclasses.dataclass
 class Block:
+    """One fenced code block extracted from a fragment.
+
+    Attributes:
+        language: First word of the fence info string, e.g. `cpp`.
+        info: The whole info string, including any markers.
+        code: Block contents, without the fences.
+        line: 1-indexed line in the file where the block opens.
+        skip: True when the fence carries `promptc:noverify`, marking a
+            block deliberately shown broken.
+    """
+
     language: str
     info: str
     code: str
@@ -35,6 +51,15 @@ class Block:
     skip: bool
 
 def extract_blocks(item):
+    """Find every fenced code block in a fragment.
+
+    Args:
+        item: Fragment to scan.
+
+    Returns:
+        list: Block objects in document order, including skipped ones so a
+        caller can count what it chose not to run.
+    """
     blocks = []
     for match in FENCE_PATTERN.finditer(item.body):
         info = match.group("info").strip()
@@ -51,10 +76,20 @@ def extract_blocks(item):
 ###########################################################
 # Matching a verifier to a block
 ###########################################################
-# A verifier's `match` is compared against the fence info string. Both
-# "```cpp" and "cpp" forms are accepted in config so the YAML can read
-# naturally either way.
 def verifier_matches(verifier, block):
+    """Decide whether a verifier applies to a block.
+
+    Both "```cpp" and "cpp" forms are accepted in config, so the YAML can
+    read naturally either way.
+
+    Args:
+        verifier: Configured Verifier.
+        block: Block to test.
+
+    Returns:
+        bool: True when the verifier's `match` equals the block's language
+        or appears in its info string. An empty `match` matches everything.
+    """
     if not verifier.match:
         return True
     needle = verifier.match.strip().strip("`").strip()
@@ -67,6 +102,17 @@ def verifier_matches(verifier, block):
 ###########################################################
 @dataclasses.dataclass
 class VerifyResult:
+    """The outcome of running one verifier against one block.
+
+    Attributes:
+        verifier: Verifier id.
+        block: The Block that was checked.
+        fragment: Id of the fragment it came from.
+        ok: Whether the verifier exited zero.
+        returncode: Exit code. 124 for a timeout, 127 for a missing binary.
+        output: Combined stdout and stderr, stripped.
+    """
+
     verifier: str
     block: Block
     fragment: str
@@ -75,6 +121,11 @@ class VerifyResult:
     output: str
 
 def _suffix_for(verifier, block):
+    """Choose the temp file extension for a block.
+
+    Prefers the verifier's configured suffix, then the fence language, so a
+    ```cpp block becomes `.cpp` with no configuration at all.
+    """
     if verifier.suffix:
         return verifier.suffix
     if block.language:
@@ -82,6 +133,23 @@ def _suffix_for(verifier, block):
     return ".txt"
 
 def run_verifier(verifier, block, fragment, cwd):
+    """Write a block to a temp file and run one verifier over it.
+
+    Never raises. A timeout and a missing binary both become synthetic exit
+    codes, so the caller has a single code path.
+
+    Args:
+        verifier: Configured Verifier. `{file}` in its command is replaced
+            with the temp file path.
+        block: Block to check.
+        fragment: Id of the owning fragment, for reporting.
+        cwd: Working directory for the subprocess, normally the project
+            root so relative commands resolve.
+
+    Returns:
+        VerifyResult: The temp file is removed before returning, whatever
+        happened.
+    """
     suffix = _suffix_for(verifier, block)
     handle = tempfile.NamedTemporaryFile(
         mode = "w", suffix = suffix, delete = False, encoding = "utf-8")
@@ -117,15 +185,30 @@ def run_verifier(verifier, block, fragment, cwd):
 ###########################################################
 # PC006
 ###########################################################
-# Trim verifier output to something a diagnostic can carry without
-# flooding the report.
 def _summarise(output, limit = 6):
+    """Trim verifier output to something a diagnostic can carry."""
     lines = [line for line in output.splitlines() if line.strip()]
     if len(lines) <= limit:
         return "\n".join(lines)
     return "\n".join(lines[:limit] + [f"... ({len(lines) - limit} more lines)"])
 
 def check_examples(config, fragments, only_fragment = None):
+    """Run every configured verifier over every example block (PC006).
+
+    Args:
+        config: Loaded Config, supplying the verifiers.
+        fragments: Fragments to check.
+        only_fragment: Limit to one fragment id, for iterating on a single
+            recipe's examples.
+
+    Returns:
+        tuple: (diagnostics, results). Diagnostics are PC006, ERROR
+        severity, one per failing block-verifier pair. Results cover every
+        pair that ran, including passes, so a caller can report how many
+        blocks were checked. Both are empty when no verifiers are
+        configured -- silence rather than a complaint, since verifying
+        examples is opt-in.
+    """
     found = []
     results = []
 

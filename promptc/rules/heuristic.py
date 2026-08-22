@@ -1,9 +1,16 @@
-# Heuristic rules: PC100-PC105.
-#
-# These measure surface features that plausibly predict how well a smaller
-# open-weight model follows a prompt. None of them is validated on arrival.
-# Thresholds ship loose, every finding is a WARN, and `promptc calibrate`
-# is what decides whether a rule stays, tightens, or gets deleted.
+"""Heuristic rules: PC100-PC105.
+
+These measure surface features that plausibly predict how well a smaller
+open-weight model follows a prompt. None of them is validated on arrival.
+Thresholds ship loose, every finding is a WARN, and `promptc calibrate` is
+what decides whether a rule stays, tightens, or gets deleted.
+
+Two habits keep them honest. Every check abstains when there is too little
+text to measure, rather than reporting a density derived from one sentence.
+And every message states the measurement alongside the threshold, so a
+reader can tell a real finding from a miscalibrated rule without re-running
+anything.
+"""
 
 # Imports
 import re
@@ -19,6 +26,19 @@ FENCE_PATTERN = re.compile(r"```.*?```", re.S)
 INLINE_CODE_PATTERN = re.compile(r"`[^`]*`")
 
 def prose_only(text):
+    """Remove fenced and inline code from text.
+
+    Prose metrics must not measure code samples: a recipe with a long
+    example is not a badly written recipe, and `generally` inside backticks
+    is a literal rather than a hedge.
+
+    Args:
+        text: Markdown text.
+
+    Returns:
+        str: The text with code replaced by spaces, preserving length
+        roughly enough that density figures stay meaningful.
+    """
     text = FENCE_PATTERN.sub(" ", text)
     text = INLINE_CODE_PATTERN.sub(" ", text)
     return text
@@ -26,6 +46,17 @@ def prose_only(text):
 SENTENCE_PATTERN = re.compile(r"[^.!?\n]+[.!?]?")
 
 def sentences(text):
+    """Split text into sentences.
+
+    Deliberately crude -- newlines end a sentence, which suits list items
+    and numbered steps better than a linguistic splitter would.
+
+    Args:
+        text: Text to split, ideally already passed through prose_only.
+
+    Returns:
+        list: Stripped sentences, with empties dropped.
+    """
     return [s.strip() for s in SENTENCE_PATTERN.findall(text) if s.strip()]
 
 # Verbs that open an instruction in this kind of document.
@@ -46,6 +77,20 @@ MODAL_PATTERN = re.compile(r"\b(must|must not|never|always|shall|should|do not|d
 NEGATIVE_PATTERN = re.compile(r"\b(must not|never|do not|don't|avoid|refrain|without)\b", re.I)
 
 def imperatives(text):
+    """Find sentences that read as instructions.
+
+    A sentence counts when it opens with a verb from IMPERATIVE_VERBS or
+    contains a modal ("must", "never", "should"). Approximate by design:
+    the figure feeds a warning threshold, not a decision.
+
+    Args:
+        text: Fragment body. Code is stripped internally.
+
+    Returns:
+        list: The matching sentences, in document order. List markers and
+        step numbers are ignored when testing the opening word, so
+        "1. Set the field." counts.
+    """
     found = []
     for sentence in sentences(prose_only(text)):
         stripped = sentence.lstrip("-*0123456789. \t")
@@ -60,6 +105,21 @@ def imperatives(text):
 # PC100 -- hedge density
 ###########################################################
 def check_hedges(config, fragments, counter):
+    """Report fragments dense in hedging phrases (PC100).
+
+    Hedges ask the reader to infer intent. Large models resolve them from
+    context; smaller open-weight models tend to pick a reading at random,
+    and the failure is silent because the output still looks confident.
+
+    Args:
+        config: Loaded Config, supplying the hedge list and threshold.
+        fragments: Fragments to check.
+        counter: Counter used to normalise hits per 1,000 tokens.
+
+    Returns:
+        list: PC100 diagnostics, WARN severity. Fragments under 100 tokens
+        are skipped, since a density derived from one sentence is noise.
+    """
     found = []
     threshold = config.threshold("PC100")
     if threshold is None:
@@ -101,6 +161,20 @@ def check_hedges(config, fragments, counter):
 # PC101 -- negation density
 ###########################################################
 def check_negations(config, fragments):
+    """Report fragments phrased mostly as prohibitions (PC101).
+
+    Positive instructions transfer better than negative ones. "Never do X"
+    leaves the space of acceptable actions undefined, and a model that
+    complies still has to invent what to do instead.
+
+    Args:
+        config: Loaded Config, supplying the threshold.
+        fragments: Fragments to check.
+
+    Returns:
+        list: PC101 diagnostics, WARN severity. Fragments with fewer than
+        eight instructions are skipped, since the ratio is unstable there.
+    """
     found = []
     threshold = config.threshold("PC101")
     if threshold is None:
@@ -129,6 +203,18 @@ def check_negations(config, fragments):
 # PC102 -- instruction count
 ###########################################################
 def check_instruction_count(config, fragments):
+    """Report fragments carrying too many separate instructions (PC102).
+
+    Instruction-following degrades with count well before it degrades with
+    length, and the instructions lost are usually the middle ones.
+
+    Args:
+        config: Loaded Config, supplying the threshold.
+        fragments: Fragments to check.
+
+    Returns:
+        list: PC102 diagnostics, WARN severity.
+    """
     found = []
     threshold = config.threshold("PC102")
     if threshold is None:
@@ -152,6 +238,20 @@ def check_instruction_count(config, fragments):
 # PC103 -- sentence complexity
 ###########################################################
 def check_complexity(config, fragments):
+    """Report fragments with long or heavily subordinated sentences (PC103).
+
+    Multi-clause conditionals are where small models drop a qualifier and
+    apply a rule in a case it was scoped out of.
+
+    Args:
+        config: Loaded Config, supplying the threshold.
+        fragments: Fragments to check.
+
+    Returns:
+        list: PC103 diagnostics, WARN severity. Empty when textstat is not
+        installed -- the rule abstains rather than failing, since it is
+        optional. Fragments under 400 characters are skipped.
+    """
     found = []
     threshold = config.threshold("PC103")
     if threshold is None:
@@ -188,13 +288,35 @@ def check_complexity(config, fragments):
 # PC104 -- vocabulary drift
 ###########################################################
 def check_vocabulary(config, fragments):
+    """Report banned synonyms for a canonical term (PC104).
+
+    Synonyms for a term of art force the model to decide whether two names
+    mean the same thing. It sometimes decides they do not.
+
+    Args:
+        config: Loaded Config, supplying the canonical-to-synonyms map.
+        fragments: Fragments to check.
+
+    Returns:
+        list: PC104 diagnostics, WARN severity, one per canonical term per
+        fragment. Empty when no vocabulary is configured.
+    """
     found = []
     if not config.vocabulary:
         return found
 
     for item in fragments:
-        text = item.prose()
+        prose = item.prose()
         for canonical, synonyms in sorted(config.vocabulary.items()):
+
+            # Blank out the canonical term first, keeping the text the same
+            # length so offsets stay valid. Without this, a synonym that is
+            # a substring of the canonical term ("the keep" inside "the keep
+            # file") makes correct usage report itself.
+            canonical_pattern = re.compile(
+                r"(?<![\w-])" + re.escape(canonical) + r"(?![\w-])", re.I)
+            text = canonical_pattern.sub(lambda m: " " * len(m.group(0)), prose)
+
             for synonym in synonyms:
                 pattern = re.compile(r"(?<![\w-])" + re.escape(synonym) + r"(?![\w-])", re.I)
                 match = pattern.search(text)
@@ -212,9 +334,28 @@ def check_vocabulary(config, fragments):
 ###########################################################
 # PC105 -- critical rules buried
 ###########################################################
-# Measured against a whole assembly rather than a fragment, because
-# position only means anything once the prompt is built.
 def check_critical_position(config, assembly, counter):
+    """Report hard constraints buried mid-assembly (PC105).
+
+    Attention to the middle of a long context is measurably weaker than to
+    either end, and hard constraints are exactly what you cannot afford to
+    lose.
+
+    Measured against a whole assembly rather than a fragment, because
+    position only means anything once the prompt is built. The diagnostic
+    therefore carries the pseudo-path `<assembly:task-id>` instead of a
+    file, and is the only rule that does so.
+
+    Args:
+        config: Loaded Config, supplying the threshold.
+        assembly: The built Assembly to measure.
+        counter: Accepted for signature symmetry with the other checks;
+            position is measured in characters, not tokens.
+
+    Returns:
+        list: At most one PC105 diagnostic, WARN severity. Assemblies under
+        4,000 characters are skipped, having no meaningful middle.
+    """
     found = []
     threshold = config.threshold("PC105")
     if threshold is None or not assembly.text:

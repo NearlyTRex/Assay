@@ -1,8 +1,18 @@
-# Command line interface.
-#
-# Ergonomics here are aimed at an agent as the primary caller: every command
-# takes --format json, every diagnostic carries a fix hint, exit codes are
-# meaningful, and nothing waits on a TTY.
+"""Command line interface.
+
+Ergonomics here are aimed at an agent as the primary caller: every command
+takes --format json, every diagnostic carries a fix hint, exit codes are
+meaningful, and nothing waits on a TTY.
+
+This module holds no logic beyond argument marshalling and dispatch, which
+is what lets the test suite exercise everything else in-process and reserve
+subprocess tests for the CLI contract itself.
+
+Two conventions are load-bearing, both with tests pinning them: findings go
+to stdout while tool faults go to stderr, and the exit code is 0 for clean,
+1 for errors found, 2 for a bad invocation, 130 for an interrupt. Every
+`command_*` function returns a code rather than calling sys.exit.
+"""
 
 # Imports
 import argparse
@@ -28,22 +38,63 @@ VERSION = "0.1.0"
 # Helpers
 ###########################################################
 def fail(message, code = 2):
+    """Report a tool fault on stderr and return an exit code.
+
+    Findings never go through here -- they are diagnostics on stdout. This
+    is for the tool itself being unable to proceed.
+
+    Args:
+        message: What went wrong, and ideally what to do about it.
+        code: Exit code. Defaults to 2, meaning a bad invocation.
+
+    Returns:
+        int: The code, for the caller to return.
+    """
     print(message, file = sys.stderr)
     return code
 
 def load(args):
+    """Load the project config named by --config, or found upward."""
     return config_module.load_config(getattr(args, "config", None))
 
 def build_index(config):
+    """Parse the library and build an Index.
+
+    Returns:
+        tuple: (index, parse_errors). Parse errors are returned rather than
+        raised so each command can decide whether they are fatal for it.
+    """
     fragments, parse_errors = fragment_module.load_library(config.library_path())
     return index_module.Index(fragments), parse_errors
 
 def parse_triggers(value):
+    """Split a comma-separated --triggers value into names.
+
+    Args:
+        value: The raw option, or None.
+
+    Returns:
+        list: Stripped names, with empties dropped so a trailing comma is
+        harmless.
+    """
     if not value:
         return []
     return [part.strip() for part in value.split(",") if part.strip()]
 
 def counter_for(config, profile_name):
+    """Build a token counter for a profile, falling back silently.
+
+    Unlike run_check, this raises no PC014: the commands using it are
+    reporting token costs rather than deciding whether a budget is met, so
+    an estimate is acceptable and the counter's own label says as much.
+
+    Args:
+        config: Loaded Config.
+        profile_name: Profile name, or None for character estimation.
+
+    Returns:
+        Counter.
+    """
     profile = config.profile(profile_name) if profile_name else None
     spec = profile.tokenizer if profile else "chars"
     try:
@@ -92,8 +143,8 @@ eval:
 # The labelled corpus. Golden files are never shown to the model.
 corpus:
   root: .
-  discover: ""              # e.g. "**/*.keep.cpp"
-  golden_suffix: ""         # e.g. ".keep.cpp"
+  discover: ""              # e.g. "**/*.expected.txt"
+  golden_suffix: ""         # e.g. ".expected.txt"
   inputs: []                # e.g. ["{stem}.cpp", "{stem}.asm"]
   triggers_command: []      # argv emitting one trigger name per line
   stratify_by: triggers
@@ -105,6 +156,13 @@ vocabulary: {}
 """
 
 def command_init(args):
+    """Create promptc.yaml and the library layout.
+
+    The result passes its own `check`, so a fresh project starts green.
+
+    Returns:
+        int: 0, or 2 if a config already exists and --force was not given.
+    """
     target = os.path.join(os.path.abspath(args.directory), "promptc.yaml")
     if os.path.exists(target) and not args.force:
         return fail(f"{target} already exists. Pass --force to overwrite.")
@@ -128,10 +186,20 @@ def command_init(args):
 # new
 ###########################################################
 def template_path(kind):
+    """Return the path to a fragment template for this kind."""
     here = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(os.path.dirname(here), "templates", f"{kind}.md")
 
 def command_new(args):
+    """Scaffold a fragment that is structurally valid on creation.
+
+    An agent starting from this cannot produce a fragment that fails to
+    parse, which removes an entire class of first-iteration failure.
+
+    Returns:
+        int: 0 and the created path on stdout, or 2 on an unknown kind or
+        an existing file without --force.
+    """
     config = load(args)
     if args.kind not in fragment_module.KINDS:
         return fail(f"Unknown kind `{args.kind}`. One of: {', '.join(fragment_module.KINDS)}")
@@ -160,6 +228,17 @@ def command_new(args):
 # build
 ###########################################################
 def command_build(args):
+    """Assemble a task into a prompt.
+
+    With --explain, prints the token cost of each fragment worst-first
+    instead of the prompt itself -- which is how you find what to cut when
+    PC004 fires.
+
+    Returns:
+        int: 0, or 1 if the library failed to parse, or 2 for an unknown
+        task. Unresolved fragments are a warning on stderr, not a failure:
+        the partial prompt is still worth seeing.
+    """
     config = load(args)
     index, parse_errors = build_index(config)
     if parse_errors:
@@ -208,6 +287,15 @@ def command_build(args):
 # check
 ###########################################################
 def command_check(args):
+    """Run the gate and report findings.
+
+    The loop an authoring agent sits in. Findings go to stdout in either
+    format, so the exit code is what signals failure rather than the
+    presence of output.
+
+    Returns:
+        int: 1 when any error was found, else 0. Warnings never fail.
+    """
     config = load(args)
     report = run_check(
         config,
@@ -228,6 +316,15 @@ def command_check(args):
 # verify-examples
 ###########################################################
 def command_verify_examples(args):
+    """Run external verifiers over example blocks, on their own.
+
+    `check` does this too; the standalone command exists for iterating on
+    one fragment's examples via --fragment without re-running everything.
+
+    Returns:
+        int: 1 if any block failed, 0 otherwise, or 2 when no verifiers are
+        configured -- an empty run would otherwise look like a pass.
+    """
     from . import verify
 
     config = load(args)
@@ -259,6 +356,16 @@ def command_verify_examples(args):
 # split
 ###########################################################
 def command_split(args):
+    """Propose a fragment split of a monolithic prompt.
+
+    Dry run by default, because splitting overwrites by slug. Unresolved
+    section references are listed explicitly, since each becomes a PC001
+    error until rewritten.
+
+    Returns:
+        int: 0. Split reports rather than fails -- the resulting library is
+        expected to have work outstanding, and `check` is what grades it.
+    """
     config = load(args)
     out_dir = args.out or os.path.join(config.library_path(), "split")
 
@@ -305,6 +412,12 @@ def command_split(args):
 # graph
 ###########################################################
 def command_graph(args):
+    """Report dependency and routing coverage.
+
+    Returns:
+        int: 0. Parse errors are a warning here rather than a failure --
+        a partial graph still answers "what routes to what".
+    """
     config = load(args)
     index, parse_errors = build_index(config)
     if parse_errors and args.format != "json":
@@ -322,6 +435,14 @@ def command_graph(args):
 # explain
 ###########################################################
 def command_explain(args):
+    """Print a rule's rationale and remedy, or list every rule.
+
+    Exists so an agent that hit a diagnostic never needs the documentation
+    in its context to act on it.
+
+    Returns:
+        int: 0, or 2 for an unknown rule id.
+    """
     if not args.rule:
         rules = rules_base.all_rules()
         if args.format == "json":
@@ -362,6 +483,15 @@ def command_explain(args):
 # eval
 ###########################################################
 def command_eval(args):
+    """Measure prompts against the corpus by running a model.
+
+    One run per --profile, so a single invocation can produce a portability
+    index. Progress goes to stderr, leaving stdout clean for the report.
+
+    Returns:
+        int: 0, or 2 if any profile's run could not start. A low pass rate
+        is a finding, not a failure -- that is what the report is for.
+    """
     from . import evalharness
     from .evalharness import report as report_module
 
@@ -412,6 +542,14 @@ def command_eval(args):
 # calibrate
 ###########################################################
 def command_calibrate(args):
+    """Test whether heuristic rules predict measured pass rate.
+
+    Accepts several result files, merging their scorecards, so evidence
+    accumulates across runs rather than each being judged alone.
+
+    Returns:
+        int: 0, or 2 when the given files contain no runs.
+    """
     config = load(args)
     index, _ = build_index(config)
     counter = counter_for(config, args.profile)
@@ -437,6 +575,12 @@ def command_calibrate(args):
 # Parser
 ###########################################################
 def build_parser():
+    """Build the argument parser for every command.
+
+    Returns:
+        argparse.ArgumentParser: With a required subcommand, so invoking
+        promptc bare is an error rather than a silent no-op.
+    """
     parser = argparse.ArgumentParser(
         prog = "promptc",
         description = "A compiler for prompts: assemble fragments, validate them "
@@ -543,6 +687,17 @@ def build_parser():
 # Entry point
 ###########################################################
 def main(argv = None):
+    """Parse arguments and dispatch to a command.
+
+    ConfigError is caught here so a YAML typo prints a remedy rather than a
+    traceback -- it is a user error, not a crash.
+
+    Args:
+        argv: Argument list. None reads sys.argv.
+
+    Returns:
+        int: Exit code. 130 on interrupt, matching shell convention.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

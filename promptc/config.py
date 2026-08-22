@@ -1,8 +1,14 @@
-# Project configuration (promptc.yaml).
-#
-# This file is the entire domain boundary. The toolset knows how to run a
-# command you gave it and read an exit code; everything it knows about C++,
-# Ghidra, Python or anything else arrives through here.
+"""Project configuration (promptc.yaml).
+
+This file is the entire domain boundary. The toolset knows how to run a
+command you gave it and read an exit code; everything it knows about your
+language, toolchain or project arrives through here.
+
+Validation happens at parse time wherever a fault would otherwise surface
+later as a confusing diagnostic. A profile whose reserves exceed its
+context is the clearest case: left alone it produces a negative budget, and
+PC004 then blames the prompt for what is really a configuration error.
+"""
 
 # Imports
 import dataclasses
@@ -40,11 +46,26 @@ DEFAULT_HEDGES = [
 ###########################################################
 @dataclasses.dataclass
 class Verifier:
+    """An external program that decides whether some text is valid.
+
+    Attributes:
+        id: Name used to reference this verifier from `eval.verifiers`.
+        command: Argv list. `{file}` is replaced with a temp file holding
+            the text. Argv rather than a shell string, so nothing is
+            word-split or expanded behind the caller's back.
+        match: Compared against a fence info string to decide whether this
+            verifier applies to a block. Empty matches every block.
+        timeout: Seconds before the run is abandoned and treated as exit
+            124.
+        suffix: Extension for the temp file. Empty means derive it from the
+            fence language, so a ```cpp block becomes `.cpp` with no
+            configuration.
+    """
+
     id: str
     command: list
     match: str = ""
     timeout: int = 120
-    # Extension used when writing an extracted block to a temp file
     suffix: str = ""
 
 ###########################################################
@@ -52,19 +73,37 @@ class Verifier:
 ###########################################################
 @dataclasses.dataclass
 class Profile:
+    """A target model: how big its window is and how to reach it.
+
+    Attributes:
+        name: Profile name, as used by `--profile`.
+        context: Total context window in tokens.
+        tokenizer: Spec passed to tokens.counter. `chars` estimates.
+        reserve: Tokens held back for the runtime work item, which is not
+            part of the assembled prompt but must still fit beside it.
+        output_reserve: Tokens held back for the model's own output.
+        endpoint: Base URL, for the llamacpp and openai backends.
+        model: Model name, for the openai backend.
+        raw: The profile mapping as written, passed to make_backend so
+            backend-specific keys need no schema here.
+    """
+
     name: str
     context: int = 32768
     tokenizer: str = "chars"
-    # Tokens held back for the runtime payload (the work item)
     reserve: int = 0
-    # Tokens held back for the model's own output
     output_reserve: int = 2048
     endpoint: str = ""
     model: str = ""
-    # Backend selection and any backend-specific keys, passed through verbatim
     raw: dict = dataclasses.field(default_factory = dict)
 
     def budget(self):
+        """Return the tokens available to the assembled prompt.
+
+        Returns:
+            int: `context` minus both reserves. Guaranteed positive --
+            a non-positive budget is rejected at parse time.
+        """
         return self.context - self.reserve - self.output_reserve
 
 ###########################################################
@@ -72,14 +111,28 @@ class Profile:
 ###########################################################
 @dataclasses.dataclass
 class Corpus:
+    """Where the labelled work items live and how to split them.
+
+    Attributes:
+        root: Directory containing the corpus, relative to the project
+            root.
+        discover: Recursive glob finding golden files. Each match defines
+            one work item.
+        golden_suffix: Suffix stripped from a golden path to derive the
+            item stem, e.g. `.expected.txt`.
+        inputs: `{stem}`-templated paths shown to the model. A path that
+            does not exist is skipped rather than failing the item.
+        triggers_command: Argv emitting one trigger name per line.
+            `{stem}`, `{golden}` and `{input}` are substituted.
+        stratify_by: Currently only `triggers`.
+        holdout: Fraction assigned to the test split.
+        seed: Makes the split reproducible across runs and machines.
+    """
+
     root: str = ""
-    # Glob that discovers golden files; each match defines one item
     discover: str = ""
-    # Suffix stripped from a golden path to derive the item stem
     golden_suffix: str = ""
-    # Input files shown to the model, as {stem}-templated paths
     inputs: list = dataclasses.field(default_factory = list)
-    # Command emitting one trigger name per line for an item
     triggers_command: list = dataclasses.field(default_factory = list)
     stratify_by: str = "triggers"
     holdout: float = 0.2
@@ -90,26 +143,56 @@ class Corpus:
 ###########################################################
 @dataclasses.dataclass
 class EvalSettings:
-    # Task fragment used as the prompt entry point
+    """How `promptc eval` builds prompts and scores what comes back.
+
+    Attributes:
+        task: Id of the task fragment used as the prompt entry point.
+        verifiers: Verifier ids run against model output, in order. The
+            first failure wins and is what the taxonomy names.
+        extract: `fence` takes the first fenced block; `raw` uses the
+            output as-is.
+        suffix: Extension for the temp file handed to verifiers.
+        attempts: Attempts per item. pass@k is computed over these, and an
+            item stops at its first success.
+        seeds: One seed per attempt, so pass@k is reproducible. Generated
+            when not given.
+        temperature: Sampling temperature.
+        max_tokens: Generation cap.
+        baseline_profile: Profile whose pass rate is the denominator of the
+            portability index.
+        payload_header: Text separating the assembled instructions from the
+            rendered work item.
+    """
+
     task: str = ""
-    # Verifier ids run against model output, in order; first failure wins
     verifiers: list = dataclasses.field(default_factory = list)
-    # "fence" takes the first fenced block; "raw" uses the output as-is
     extract: str = "fence"
-    # Suffix for the temp file handed to verifiers
     suffix: str = ".txt"
-    # Attempts per item; pass@k is computed over these
     attempts: int = 1
     seeds: list = dataclasses.field(default_factory = list)
     temperature: float = 0.2
     max_tokens: int = 4096
-    # Profile whose pass rate is the denominator of the portability index
     baseline_profile: str = ""
-    # How the work item is rendered into the prompt
     payload_header: str = "\n\n## Work item\n\n"
 
 @dataclasses.dataclass
 class Config:
+    """A loaded promptc.yaml.
+
+    Attributes:
+        root: Absolute path to the directory holding promptc.yaml. Every
+            relative path in the config resolves against it.
+        library: Fragment directory, relative to root.
+        contracts: Grammar and schema directory, relative to root.
+        verifiers: Configured Verifier objects.
+        eval: EvalSettings.
+        profiles: Profile name to Profile.
+        corpus: Corpus.
+        thresholds: Rule id to threshold, overriding DEFAULT_THRESHOLDS.
+        hedges: Phrases counted by PC100. Falls back to DEFAULT_HEDGES.
+        vocabulary: Canonical term to banned synonyms, driving PC104.
+    """
+
     root: str
     library: str = "promptlib"
     contracts: str = "contracts"
@@ -119,22 +202,34 @@ class Config:
     corpus: Corpus = dataclasses.field(default_factory = Corpus)
     thresholds: dict = dataclasses.field(default_factory = dict)
     hedges: list = dataclasses.field(default_factory = list)
-    # canonical term -> [banned synonyms], drives PC104
     vocabulary: dict = dataclasses.field(default_factory = dict)
 
     def library_path(self):
+        """Return the absolute path to the fragment library."""
         return os.path.join(self.root, self.library)
 
     def contracts_path(self):
+        """Return the absolute path to the contracts directory."""
         return os.path.join(self.root, self.contracts)
 
     def threshold(self, rule):
+        """Return the threshold for a heuristic rule.
+
+        Args:
+            rule: Rule id, e.g. `PC100`.
+
+        Returns:
+            The configured override, else the built-in default, else None.
+            None means the rule has no threshold and should abstain.
+        """
         return self.thresholds.get(rule, DEFAULT_THRESHOLDS.get(rule))
 
     def profile(self, name):
+        """Return the named profile, or None."""
         return self.profiles.get(name)
 
     def verifier(self, verifier_id):
+        """Return the verifier with this id, or None."""
         for verifier in self.verifiers:
             if verifier.id == verifier_id:
                 return verifier
@@ -144,12 +239,25 @@ class Config:
 # Loading
 ###########################################################
 class ConfigError(Exception):
-    pass
+    """The project configuration is invalid or missing.
+
+    Raised with a message naming the file, what is wrong, and what correct
+    looks like. cli.main catches it and prints it without a traceback,
+    because a typo in YAML is a user error rather than a crash.
+    """
 
 CONFIG_NAMES = ("promptc.yaml", "promptc.yml")
 
-# Walk upward from `start` looking for a project config.
 def find_config(start = "."):
+    """Search upward for a project config.
+
+    Args:
+        start: Directory to start from.
+
+    Returns:
+        str: Absolute path to the nearest config, or None if the search
+        reaches the filesystem root without finding one.
+    """
     current = os.path.abspath(start)
     while True:
         for name in CONFIG_NAMES:
@@ -162,6 +270,19 @@ def find_config(start = "."):
         current = parent
 
 def _parse_verifiers(raw, path):
+    """Parse the `verifiers` block.
+
+    Args:
+        raw: The raw list, or None.
+        path: Config path, for error messages.
+
+    Returns:
+        list: Verifier objects.
+
+    Raises:
+        ConfigError: An entry is not a mapping, lacks `id`, or gives
+            `command` as anything but a non-empty list.
+    """
     verifiers = []
     for entry in raw or []:
         if not isinstance(entry, dict):
@@ -183,16 +304,45 @@ def _parse_verifiers(raw, path):
     return verifiers
 
 def _parse_profiles(raw, path):
+    """Parse the `profiles` block.
+
+    Args:
+        raw: The raw mapping, or None.
+        path: Config path, for error messages.
+
+    Returns:
+        dict: Profile name to Profile.
+
+    Raises:
+        ConfigError: A profile is not a mapping, or leaves no room for a
+            prompt once both reserves are subtracted from its context.
+    """
     profiles = {}
     for name, entry in (raw or {}).items():
         if not isinstance(entry, dict):
             raise ConfigError(f"{path}: profile `{name}` must be a mapping.")
+
+        context = int(entry.get("context", 32768))
+        reserve = int(entry.get("reserve", 0))
+        output_reserve = int(entry.get("output_reserve", 2048))
+
+        # A non-positive budget makes PC004 nonsense: every prompt "exceeds"
+        # it, and the diagnostic then blames the prompt for what is really a
+        # configuration fault.
+        if context - reserve - output_reserve <= 0:
+            raise ConfigError(
+                f"{path}: profile `{name}` leaves no room for a prompt — context "
+                f"{context:,} minus reserve {reserve:,} minus output_reserve "
+                f"{output_reserve:,} is {context - reserve - output_reserve:,}.\n"
+                f"Raise `context`, or lower the reserves "
+                f"(`output_reserve` defaults to 2048).")
+
         profiles[str(name)] = Profile(
             name = str(name),
-            context = int(entry.get("context", 32768)),
+            context = context,
             tokenizer = str(entry.get("tokenizer", "chars")),
-            reserve = int(entry.get("reserve", 0)),
-            output_reserve = int(entry.get("output_reserve", 2048)),
+            reserve = reserve,
+            output_reserve = output_reserve,
             endpoint = str(entry.get("endpoint", "")),
             model = str(entry.get("model", "")),
             raw = dict(entry),
@@ -200,6 +350,21 @@ def _parse_profiles(raw, path):
     return profiles
 
 def _parse_corpus(raw, path):
+    """Parse the `corpus` block.
+
+    Args:
+        raw: The raw mapping, or None.
+        path: Config path, for error messages.
+
+    Returns:
+        Corpus: Defaults throughout when the block is absent. Missing
+        required fields are reported later by corpus.discover, which can
+        say what they are for.
+
+    Raises:
+        ConfigError: The block is not a mapping, or `triggers_command` is
+            not a list.
+    """
     raw = raw or {}
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: `corpus` must be a mapping.")
@@ -218,6 +383,24 @@ def _parse_corpus(raw, path):
     )
 
 def _parse_eval(raw, path):
+    """Parse the `eval` block.
+
+    Seeds are generated when absent so that pass@k is reproducible without
+    the author having to think about it, but a short explicit list is an
+    error rather than being silently padded -- padding would make one run's
+    figures incomparable with the next.
+
+    Args:
+        raw: The raw mapping, or None.
+        path: Config path, for error messages.
+
+    Returns:
+        EvalSettings.
+
+    Raises:
+        ConfigError: The block is not a mapping, `extract` is not `fence`
+            or `raw`, or fewer seeds are given than attempts.
+    """
     raw = raw or {}
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: `eval` must be a mapping.")
@@ -250,11 +433,33 @@ def _parse_eval(raw, path):
     )
 
 def load_config(path = None, start = "."):
+    """Load and validate a project configuration.
+
+    Args:
+        path: Explicit config path. When None, searches upward from
+            `start`.
+        start: Directory to search from when `path` is None.
+
+    Returns:
+        Config: With `root` set to the directory holding the file, so
+        every relative path in it resolves correctly regardless of the
+        working directory.
+
+    Raises:
+        ConfigError: No config was found, an explicit path does not exist,
+            the top level is not a mapping, or any block fails validation.
+    """
     path = path or find_config(start)
     if path is None:
         raise ConfigError(
             "No promptc.yaml found in this directory or any parent.\n"
             "Run `promptc init` to create one.")
+
+    # An explicit --config that does not exist is a user typo, not a crash
+    if not os.path.exists(path):
+        raise ConfigError(
+            f"Config file not found: {path}\n"
+            f"Check the path, or run `promptc init` to create one.")
 
     with open(path, "r", encoding = "utf-8") as handle:
         raw = yaml.safe_load(handle) or {}

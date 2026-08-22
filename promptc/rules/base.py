@@ -1,12 +1,19 @@
-# Rule catalogue.
-#
-# Every rule has a stable id, a rationale and a remedy, so `promptc explain`
-# can answer an agent's question without the docs being in context.
-#
-# The split matters: ERROR rules are decidable facts about the source tree
-# or about an external program's exit code. WARN rules are heuristics, and
-# every heuristic marked `calibrated` is a placeholder until `promptc
-# calibrate` measures whether it predicts pass rate.
+"""Rule catalogue.
+
+Every rule has a stable id, a rationale and a remedy, so `promptc explain`
+can answer an agent's question without the docs being in context. This
+module is the only place that reasoning lives -- a check function knows how
+to detect its fault, not why the fault matters.
+
+The split matters: ERROR rules are decidable facts about the source tree or
+about an external program's exit code. WARN rules are heuristics, and every
+heuristic marked `calibrated` is a placeholder until `promptc calibrate`
+measures whether it predicts pass rate.
+
+Ids are `PC0xx` for structural rules and `PC1xx` for heuristics. The band is
+enforced by tests, not merely conventional. Ids are never renumbered or
+reused, because they appear in suppression comments in user repositories.
+"""
 
 # Imports
 import dataclasses
@@ -19,25 +26,62 @@ from ..diagnostics import Severity
 ###########################################################
 @dataclasses.dataclass
 class Rule:
+    """One rule's identity and documentation.
+
+    Attributes:
+        id: Stable id, `PC` plus three digits. `PC0xx` is structural,
+            `PC1xx` heuristic.
+        name: Short kebab-case name, e.g. `dangling-reference`.
+        severity: Default severity. A `PC1xx` rule may never be ERROR.
+        summary: One line stating what was found.
+        rationale: Why the thing is a problem. Printed by `promptc explain`
+            and required to say more than the summary does.
+        remedy: How to fix it, concretely.
+        calibrated: True when the rule's threshold is a guess awaiting
+            `promptc calibrate`. Only heuristics may set this, and
+            `explain` surfaces it so a reader knows not to trust the number.
+    """
+
     id: str
     name: str
     severity: Severity
     summary: str
     rationale: str
     remedy: str
-    # True when the threshold is a guess until eval data exists
     calibrated: bool = False
 
 CATALOGUE = {}
 
 def register(rule):
+    """Add a rule to the catalogue.
+
+    Args:
+        rule: The Rule to register.
+
+    Returns:
+        Rule: The same rule, so registration can wrap construction.
+    """
     CATALOGUE[rule.id] = rule
     return rule
 
 def get(rule_id):
+    """Look up a rule by id, case-insensitively.
+
+    Args:
+        rule_id: Rule id, e.g. `PC001` or `pc001`.
+
+    Returns:
+        Rule: The rule, or None if no such id is registered.
+    """
     return CATALOGUE.get(rule_id.upper())
 
 def all_rules():
+    """Return every registered rule, ordered by id.
+
+    Returns:
+        list: Rule objects. Deterministic, so `promptc explain` with no
+        argument always lists them in the same order.
+    """
     return [CATALOGUE[key] for key in sorted(CATALOGUE)]
 
 ###########################################################

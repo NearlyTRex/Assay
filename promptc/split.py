@@ -1,9 +1,17 @@
-# Mechanical decomposition of a monolithic prompt.
-#
-# `split` proposes structure and stops. It slices on the heading tree,
-# derives ids, wires `requires` to the parent section, and rewrites the
-# section-number references it can resolve exactly. It never rewrites prose
-# -- that is the authoring model's job, gated by `check`.
+"""Mechanical decomposition of a monolithic prompt.
+
+`split` proposes structure and stops. It slices on the heading tree,
+derives ids, wires `requires` to the parent section, and rewrites the
+section-number references it can resolve exactly. It never rewrites prose
+-- that is the authoring model's job, gated by `check`.
+
+The boundary is deliberate. Everything here is derivable from the document:
+which heading owns which text, which `§20` maps to which section, which
+slug collides with which. The moment the tool starts making editorial calls
+it becomes another thing you have to verify. Anything it cannot resolve is
+reported rather than guessed at, and becomes a PC001 error until a human or
+an authoring model fixes it.
+"""
 
 # Imports
 import dataclasses
@@ -15,13 +23,25 @@ from . import fragment as fragment_module
 
 HEADING_PATTERN = re.compile(r"^(?P<hashes>#{1,6})[ \t]+(?P<title>.+?)[ \t]*$", re.M)
 
-# "### 20. Missing cave-block struct memcpy" -> legacy section number 20
+# "### 20. Unchecked return value" -> legacy section number 20
 NUMBERED_PATTERN = re.compile(r"^(?P<number>\d+)[.)]\s*(?P<rest>.+)$")
 
 ###########################################################
 # Slugging
 ###########################################################
 def slugify(text, limit = 48):
+    """Convert a heading into a fragment id.
+
+    Args:
+        text: Heading text. Backticks are unwrapped rather than dropped, so
+            `` `memcpy` `` keeps its word.
+        limit: Maximum length. Truncation falls back to a word boundary, so
+            an id never ends mid-word.
+
+    Returns:
+        str: A lowercase kebab-case slug, never empty -- a heading of pure
+        punctuation yields "section". Uniqueness is plan_split's problem.
+    """
     text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()
     text = re.sub(r"-{2,}", "-", text)
@@ -35,6 +55,20 @@ def slugify(text, limit = 48):
 ###########################################################
 @dataclasses.dataclass
 class Section:
+    """One heading and the text beneath it.
+
+    Attributes:
+        level: Heading depth -- 1 for `#`, 2 for `##`, and so on.
+        title: Heading text, with any leading section number removed.
+        body: Everything up to the next heading of any level.
+        line: 1-indexed line of the heading in the source document.
+        number: Leading section number, e.g. 20 from "20. Missing memcpy".
+            Zero when unnumbered. This is what makes `§20` resolvable.
+        slug: Derived fragment id, assigned by plan_split.
+        parent: Slug of the enclosing shallower section, or empty.
+        kind: Fragment kind to emit.
+    """
+
     level: int
     title: str
     body: str
@@ -45,6 +79,16 @@ class Section:
     kind: str = "recipe"
 
 def parse_sections(text):
+    """Split a document into sections on its heading tree.
+
+    Args:
+        text: The whole document.
+
+    Returns:
+        list: Section objects in document order, with `number` extracted
+        from numbered headings and stripped from the title. Slugs and
+        parents are not yet assigned.
+    """
     matches = list(HEADING_PATTERN.finditer(text))
     sections = []
 
@@ -74,14 +118,39 @@ def parse_sections(text):
 ###########################################################
 @dataclasses.dataclass
 class Plan:
+    """What a split produced, or would produce on a dry run.
+
+    Attributes:
+        fragments: (path, content, section) triples, in document order.
+        number_map: Legacy section number to fragment id, used for
+            reference rewriting and reported so a reader can check it.
+        unresolved_refs: (fragment_slug, reference_text) pairs for section
+            numbers that mapped to nothing. Left untouched in the body, and
+            each becomes a PC001 error until rewritten.
+    """
+
     fragments: list
-    # legacy section number -> fragment id, for reference rewriting
     number_map: dict
     unresolved_refs: list
 
-# Assign ids, kinds and parents. Sections at or below `level` become
-# fragments; shallower ones become the parent they hang off.
 def plan_split(sections, level = 3, kind_for_leaf = "recipe"):
+    """Assign ids, kinds and parents to the parsed sections.
+
+    Sections at or below `level` become leaf fragments; shallower ones
+    become the parents they hang off. The single `#` title is skipped, as
+    it names the document rather than a section of it.
+
+    Args:
+        sections: Sections from parse_sections. Mutated in place to set
+            `slug`, `parent` and `kind`.
+        level: Heading depth that becomes a leaf fragment.
+        kind_for_leaf: Fragment kind assigned to leaves.
+
+    Returns:
+        tuple: (chosen_sections, number_map). Slugs are deduplicated by
+        suffixing -- `overview`, `overview-2` -- so two identically titled
+        sections do not collide.
+    """
     chosen = []
     ancestors = {}
     used = {}
@@ -123,13 +192,25 @@ def plan_split(sections, level = 3, kind_for_leaf = "recipe"):
 ###########################################################
 SECTION_REF_PATTERN = re.compile(r"§\s*(\d+)")
 
-# Rewrite "§20" to an explicit ref when the number maps to a section we
-# actually found. Anything unmapped is reported, never guessed at.
-#
-# Also returns the set of targets it resolved: a reference this function
-# created is a dependency this function knows about, so wiring it into
-# `requires` is bookkeeping rather than an editorial call.
 def rewrite_refs(body, number_map, section_slug):
+    """Turn resolvable `§20` references into `{{ref:id}}`.
+
+    Anything unmapped is reported, never guessed at. A section referring to
+    itself becomes the words "this recipe", since a self-reference carries
+    no information once the section is its own fragment.
+
+    Args:
+        body: Section body.
+        number_map: Legacy section number to fragment id.
+        section_slug: Slug of the section being rewritten, so a
+            self-reference can be recognised.
+
+    Returns:
+        tuple: (rewritten_body, unresolved, resolved). `resolved` is the
+        set of targets this call created references to -- a reference the
+        function just made is a dependency it knows about, so wiring it
+        into `requires` is bookkeeping rather than an editorial call.
+    """
     unresolved = []
     resolved = []
 
@@ -151,6 +232,19 @@ def rewrite_refs(body, number_map, section_slug):
 # Emission
 ###########################################################
 def render_fragment(section, requires, contract = ""):
+    """Render a section as fragment source.
+
+    `triggers` and `provides` are emitted empty with TODO comments rather
+    than guessed at -- routing and vocabulary are editorial calls.
+
+    Args:
+        section: Section to render, with slug and kind assigned.
+        requires: Fragment ids to declare, parent first.
+        contract: Optional contract path.
+
+    Returns:
+        str: Complete fragment file content, ending in a newline.
+    """
     lines = ["---", f"id: {section.slug}", f"kind: {section.kind}"]
     lines.append(f"title: {yaml_scalar(section.title)}")
     if section.number:
@@ -167,14 +261,40 @@ def render_fragment(section, requires, contract = ""):
     lines.append("")
     return "\n".join(lines)
 
-# Quote a YAML scalar only when it needs it.
 def yaml_scalar(text):
+    """Quote a YAML scalar, but only when it needs it.
+
+    Headings routinely contain colons ("Warning: do not do this"), which
+    would otherwise produce frontmatter that does not parse.
+
+    Args:
+        text: Scalar value.
+
+    Returns:
+        str: The text unchanged when safe, else a double-quoted form with
+        backslashes and quotes escaped.
+    """
     if re.search(r"[:#\[\]{}&*!|>'\"%@`]|^\s|\s$", text):
         escaped = text.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
     return text
 
 def split_file(path, out_dir, level = 3, kind_for_leaf = "recipe", dry_run = True):
+    """Decompose a monolithic prompt into fragment skeletons.
+
+    Args:
+        path: The document to split.
+        out_dir: Directory to write fragments into.
+        level: Heading depth that becomes a leaf fragment.
+        kind_for_leaf: Fragment kind assigned to leaves.
+        dry_run: When True, nothing is written -- the returned Plan still
+            describes exactly what would be. This is the default, because
+            splitting overwrites by slug.
+
+    Returns:
+        Plan: Describing every fragment, the number map, and every
+        reference that could not be resolved.
+    """
     with open(path, "r", encoding = "utf-8") as handle:
         text = handle.read()
 
