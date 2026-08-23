@@ -165,8 +165,13 @@ def discover(config, limit = 0):
 ###########################################################
 # Trigger routing
 ###########################################################
-def resolve_triggers(config, item, root):
+def resolve_triggers(config, item, root = None):
     """Ask the project which patterns fired for one item.
+
+    Runs from the project root, like every other configured command, so a
+    project-relative script path means the same thing here as it does under
+    `verifiers`. Paths handed to it are corpus-relative, so a detector
+    joins them to `corpus.root` itself.
 
     A non-zero exit means "no triggers", not a hard failure: a detector
     that legitimately finds nothing must not abort a run of a thousand
@@ -176,7 +181,8 @@ def resolve_triggers(config, item, root):
         config: Loaded Config, supplying `corpus.triggers_command`.
         item: The Item to inspect. `{stem}`, `{golden}` and `{input}` are
             substituted into the command.
-        root: Working directory for the subprocess.
+        root: Accepted for call-site symmetry with the other corpus
+            helpers; the subprocess always runs from the project root.
 
     Returns:
         list: Trigger names, one per non-empty output line. Empty when no
@@ -200,7 +206,7 @@ def resolve_triggers(config, item, root):
 
     try:
         completed = subprocess.run(
-            command, cwd = root, capture_output = True, text = True, timeout = 60)
+            command, cwd = config.root, capture_output = True, text = True, timeout = 60)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
@@ -209,13 +215,13 @@ def resolve_triggers(config, item, root):
 
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
-def annotate_triggers(config, items, root):
+def annotate_triggers(config, items, root = None):
     """Fill in `triggers` on every item, in place.
 
     Args:
         config: Loaded Config.
         items: Items to annotate.
-        root: Working directory for the detector subprocess.
+        root: Accepted for call-site symmetry; unused.
 
     Returns:
         list: The same items, for chaining.

@@ -182,6 +182,27 @@ def test_triggers_command_output_becomes_trigger_names(project, write):
     assert items[0].triggers == ["pattern_x", "pattern_y"]
 
 @pytest.mark.integration
+def test_triggers_command_runs_from_the_project_root(project, write):
+    """A project-relative script must mean the same under `triggers_command`
+    as it does under `verifiers` -- both run from the project root."""
+    write(os.path.join(project, "scripts", "detect.sh"),
+          "#!/bin/bash\necho from_project_root\n")
+    os.chmod(os.path.join(project, "scripts", "detect.sh"), 0o755)
+    write(os.path.join(project, "promptc.yaml"), """
+        corpus:
+          root: corpus
+          discover: "**/*.keep.txt"
+          golden_suffix: ".keep.txt"
+          triggers_command: ["./scripts/detect.sh", "{stem}"]
+    """)
+    write(os.path.join(project, "corpus", "alpha.keep.txt"), "golden\n")
+    config = config_module.load_config(os.path.join(project, "promptc.yaml"))
+
+    items, root = corpus_module.discover(config)
+    corpus_module.annotate_triggers(config, items, root)
+    assert items[0].triggers == ["from_project_root"]
+
+@pytest.mark.integration
 def test_failing_triggers_command_means_no_triggers(project, write):
     """A detector that finds nothing exits non-zero; that is not a run failure."""
     write(os.path.join(project, "promptc.yaml"), """
