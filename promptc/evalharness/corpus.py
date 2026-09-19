@@ -13,6 +13,7 @@ cannot be compared to the previous one.
 import dataclasses
 import glob
 import hashlib
+import json
 import os
 import subprocess
 
@@ -215,19 +216,82 @@ def resolve_triggers(config, item, root = None):
 
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
-def annotate_triggers(config, items, root = None):
+CACHE_NAME = ".promptc-triggers.json"
+
+def _cache_path(config):
+    """Return the path of the trigger cache for this project."""
+    return os.path.join(config.root, CACHE_NAME)
+
+def load_trigger_cache(config):
+    """Read the trigger cache, or an empty one.
+
+    Returns:
+        dict: stem -> {"mtime": float, "triggers": [str]}. A corrupt or
+        unreadable cache is treated as empty rather than fatal; the worst
+        outcome is that detection runs again.
+    """
+    try:
+        with open(_cache_path(config), "r", encoding = "utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+def save_trigger_cache(config, cache):
+    """Write the trigger cache, ignoring failure.
+
+    A cache that cannot be written costs time on the next run and nothing
+    else, so it is not worth failing an evaluation over.
+    """
+    try:
+        with open(_cache_path(config), "w", encoding = "utf-8") as handle:
+            json.dump(cache, handle, indent = 1, sort_keys = True)
+    except OSError:
+        pass
+
+def annotate_triggers(config, items, root = None, progress = None):
     """Fill in `triggers` on every item, in place.
+
+    Detection is the expensive part of an evaluation -- it runs the
+    project's own analysis per item, which may mean a compile -- so results
+    are cached against each input's modification time. A corpus is detected
+    once and re-detected only where a file actually changed.
 
     Args:
         config: Loaded Config.
         items: Items to annotate.
-        root: Accepted for call-site symmetry; unused.
+        root: Corpus root, used to stat the inputs for cache validity.
+        progress: Optional callable(position, total, item) for long runs.
 
     Returns:
         list: The same items, for chaining.
     """
-    for item in items:
-        item.triggers = resolve_triggers(config, item, root)
+    cache = load_trigger_cache(config)
+    corpus_root = root or _corpus_root(config)
+    dirty = False
+
+    for position, item in enumerate(items, start = 1):
+        stamp = 0.0
+        for relative in item.inputs:
+            path = os.path.join(corpus_root, relative)
+            try:
+                stamp = max(stamp, os.path.getmtime(path))
+            except OSError:
+                continue
+
+        entry = cache.get(item.stem)
+        if entry and entry.get("mtime") == stamp:
+            item.triggers = list(entry.get("triggers", []))
+        else:
+            item.triggers = resolve_triggers(config, item, corpus_root)
+            cache[item.stem] = {"mtime": stamp, "triggers": item.triggers}
+            dirty = True
+
+        if progress:
+            progress(position, len(items), item)
+
+    if dirty:
+        save_trigger_cache(config, cache)
     return items
 
 ###########################################################

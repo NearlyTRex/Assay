@@ -114,18 +114,32 @@ def run_eval(config, profile_name, limit = 0, per_group = 0, split = "dev",
     if not items:
         raise EvalError(f"Corpus glob matched nothing under {root}.")
 
-    corpus_module.annotate_triggers(config, items, root)
+    # Detection can take a while on a first run, so say what is happening
+    # rather than appearing to hang.
+    def detect_progress(position, total, item):
+        if progress and (position == 1 or position % 25 == 0 or position == total):
+            progress(position, total, None)
 
+    # Split before detecting. Detection runs the project's own analysis per
+    # item and is by far the most expensive step, so it must not be paid for
+    # items that were never going to be evaluated.
     dev, test = corpus_module.holdout(items, config.corpus.holdout, config.corpus.seed)
     pool = {"dev": dev, "test": test, "all": items}.get(split)
     if pool is None:
         raise EvalError("`split` must be one of dev, test, all.")
 
     if per_group:
+        # Stratifying needs every candidate's triggers, so detection cannot
+        # be narrowed here. A plain --limit is applied first to bound it.
+        if limit:
+            pool = pool[:limit]
+        corpus_module.annotate_triggers(config, pool, root, progress = detect_progress)
         pool = corpus_module.sample(pool, per_group, config.corpus.seed,
                                     config.corpus.stratify_by)
-    if limit:
-        pool = pool[:limit]
+    else:
+        if limit:
+            pool = pool[:limit]
+        corpus_module.annotate_triggers(config, pool, root, progress = detect_progress)
 
     backend = runner_module.make_backend(profile, profile.raw, cwd = config.root)
 

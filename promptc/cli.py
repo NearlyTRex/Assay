@@ -503,6 +503,10 @@ def command_eval(args):
     def progress(position, total, item_result):
         if args.format == "json" or args.quiet:
             return
+        # A None result means detection, which runs before any generation
+        if item_result is None:
+            print(f"  detecting triggers  [{position:>4}/{total}]", file = sys.stderr)
+            return
         mark = "pass" if item_result.passed() else item_result.outcome()
         print(f"  [{position:>4}/{total}] {item_result.stem[:56]:<56} {mark}",
               file = sys.stderr)
